@@ -453,6 +453,7 @@ contract RNGTracker is VRFConsumerBaseV2Plus {
 
         // set distributor
         distributor = _distributor;
+        canRequestRandom[_distributor] = true;
     }
 
     function setKeyHash(bytes32 newHash) external onlyOwner {
@@ -461,6 +462,7 @@ contract RNGTracker is VRFConsumerBaseV2Plus {
 
     function setDistributor(address newDistributor) external onlyOwner {
         distributor = newDistributor;
+        canRequestRandom[newDistributor] = true;
     }
 
     function setNumConfirmations(uint16 numConfirmations) external onlyOwner {
