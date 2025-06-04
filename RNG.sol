@@ -404,7 +404,7 @@ abstract contract VRFConsumerBaseV2Plus is IVRFMigratableConsumerV2Plus, Confirm
 
 interface IDistributor {
 
-    function distribute(uint256[] calldata randomWords) external;
+    function distribute(uint256 requestId, uint256[] calldata randomWords) external;
 }
 
 
@@ -521,6 +521,6 @@ contract RNGTracker is VRFConsumerBaseV2Plus {
     ) internal override {
 
         // perform callback
-        IDistributor(distributor).distribute(randomWords);
+        IDistributor(distributor).distribute(requestId, randomWords);
     }
 }
