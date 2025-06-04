@@ -17,12 +17,12 @@ interface IRNG {
 contract Distributor is Ownable {
     
     // --- Constants & Immutables ---
-    uint256 public constant TICKET_VALUE = 25_000 ether;
+    uint256 public constant TICKET_VALUE = 10_000 ether;
 
     // MAX_PARTICIPANTS_POW2: Max number of participant slots in the tree.
     // MUST be a power of 2 (e.g., 2^12=4096, 2^13=8192, 2^14=16384).
     // This choice balances capacity vs. gas cost for tree updates.
-    uint256 public immutable MAX_PARTICIPANTS_POW2;
+    uint256 public constant MAX_PARTICIPANTS_POW2 = 131072;
 
     address public immutable TOKEN_CONTRACT;
 
@@ -65,7 +65,7 @@ contract Distributor is Ownable {
 
     uint256 public rollOver = 90; // 10% of lotto is rolled over to next pot
 
-    uint256 public totalPrizes;
+    uint256 public totalPrizes; // Total ETH collected for prizes, used for tracking purposes only
 
     // --- Events ---
     event TicketsUpdated(address indexed user, uint256 newTicketCount, int256 ticketDelta);
@@ -85,11 +85,11 @@ contract Distributor is Ownable {
 
     constructor(
         address _tokenContractAddress,
-        uint256 _maxParticipantsPow2,
+        // uint256 _maxParticipantsPow2,
         address _rng
     ) {
-        require(_maxParticipantsPow2 > 0 && (_maxParticipantsPow2 & (_maxParticipantsPow2 - 1)) == 0, "Max participants must be > 0 and a power of 2");
-        MAX_PARTICIPANTS_POW2 = _maxParticipantsPow2;
+        // require(_maxParticipantsPow2 > 0 && (_maxParticipantsPow2 & (_maxParticipantsPow2 - 1)) == 0, "Max participants must be > 0 and a power of 2");
+        // MAX_PARTICIPANTS_POW2 = _maxParticipantsPow2;
         TOKEN_CONTRACT = _tokenContractAddress;
 
         // Initialize some exempt addresses if known at deployment (e.g., token contract itself if it holds tokens)
@@ -127,6 +127,10 @@ contract Distributor is Ownable {
     function withdrawETH(address to, uint256 amount) external onlyOwner {
         (bool s,) = payable(to).call{value: amount}("");
         require(s);
+    }
+
+    function withdrawToken(address token, address to, uint256 amount) external onlyOwner {
+        IERC20(token).transfer(to, amount);
     }
 
     function setCanStartDraw(address user, bool canStart) external onlyOwner {
