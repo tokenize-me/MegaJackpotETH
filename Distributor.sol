@@ -19,6 +19,10 @@ interface IWETH {
     function transfer(address to, uint256 value) external returns (bool);
 }
 
+interface IDistributor {
+    function distribute(uint256[] calldata randomWords) external;
+}
+
 /** Distributes And Tracks Reward Tokens for LightSpeed Holders based on weight */
 contract Distributor is Ownable, ReentrancyGuard {
     
@@ -30,11 +34,8 @@ contract Distributor is Ownable, ReentrancyGuard {
     
     // Share of Token
     struct Share {
-        uint256 amount;
-        uint256 totalExcluded;
-        address rewardToken;
+        uint256 numShares;
         bool isRewardExempt;
-        bool canBatchRewards;
     }
     
     // shareholder fields
@@ -49,7 +50,7 @@ contract Distributor is Ownable, ReentrancyGuard {
     uint256 public dividendsPerShare;
     uint256 constant dividendsPerShareAccuracyFactor = 10 ** 18;
 
-    uint256 public minHolding = 10_000 ether;
+    uint256 public constant TICKET_SIZE = 10_000 ether;
 
     uint256 public currentIndex;
 
@@ -68,35 +69,18 @@ contract Distributor is Ownable, ReentrancyGuard {
     //////////      Only Token Owner    ///////////
     ///////////////////////////////////////////////
 
-    function setMinHolding(uint256 amount) external onlyOwner {
-        minHolding = amount;
-    }
-
-    function setMinDistribution(uint256 amount) external onlyOwner {
-        minDistribution = amount;
-    }
-
-    function setCanPublicDistribute(bool canDistribute) external onlyOwner {
-        canPublicDistribute = canDistribute;
-    }
-
     function setRewardExempt(address shareholder, bool exempt) external onlyOwner {
         shares[shareholder].isRewardExempt = exempt;
         if (exempt) {
-            if (shares[shareholder].amount > 0) {
+            if (shares[shareholder].numShares > 0) {
                 // if the shareholder is exempt, we do not need to track their shares
-                totalShares -= shares[shareholder].amount;
-                shares[shareholder].amount = 0;
-                shares[shareholder].totalExcluded = 0;
+                totalShares -= shares[shareholder].numShares;
+                shares[shareholder].numShares = 0;
                 removeShareholder(shareholder);
             }
         }
     }
 
-    function setCanBatchRewards(address shareholder, bool canBatch) external onlyOwner {
-        shares[shareholder].canBatchRewards = canBatch;
-    }
-    
     ///////////////////////////////////////////////
     //////////    Only Token Contract   ///////////
     ///////////////////////////////////////////////
@@ -108,87 +92,51 @@ contract Distributor is Ownable, ReentrancyGuard {
             return;
         }
 
-        if(shares[shareholder].amount >= minHolding){
-            distributeDividend(shareholder, 0);
-        }
-
-        if (amount < minHolding && shares[shareholder].amount == 0) {
+        if (amount < TICKET_SIZE && shares[shareholder].numShares == 0) {
             // holder change, not above minimum, do nothing
             return;
         }
 
-        if (amount >= minHolding && shares[shareholder].amount >= minHolding) {
+        if (amount >= TICKET_SIZE && shares[shareholder].numShares > 0) {
+
+            uint256 newShares = amount / TICKET_SIZE;
+            uint256 oldShares = shares[shareholder].numShares;
+
             // share holder is already holding enough shares, update the total
-            totalShares = ( totalShares + amount ) - shares[shareholder].amount;
-            shares[shareholder].amount = amount;
-            shares[shareholder].totalExcluded = getCumulativeDividends(shares[shareholder].amount);
+            totalShares = ( totalShares + newShares ) - oldShares;
+            shares[shareholder].numShares = newShares;
             return;
         }
 
-        if( amount >= minHolding && shares[shareholder].amount == 0){
+        if( amount >= TICKET_SIZE && shares[shareholder].numShares == 0){
 
-            addShareholder(shareholder);
-            totalShares += amount;
-            shares[shareholder].amount = amount;
-            shares[shareholder].totalExcluded = getCumulativeDividends(shares[shareholder].amount);
+            uint256 newShares = amount / TICKET_SIZE;
+            
+            unchecked {
+                totalShares += newShares;
+            }
+            shares[shareholder].numShares = newShares;
+            addShareholder(shareholder, newShares);
 
-        } else if(amount < minHolding && shares[shareholder].amount > 0){
+        } else if(amount < TICKET_SIZE && shares[shareholder].numShares > 0){
 
+            totalShares -= shares[shareholder].numShares;
+            shares[shareholder].numShares = 0;
             removeShareholder(shareholder);
-            totalShares -= shares[shareholder].amount;
-            shares[shareholder].amount = 0;
-            shares[shareholder].totalExcluded = 0;
 
         }
     }
-    
-    ///////////////////////////////////////////////
-    //////////      Public Functions    ///////////
-    ///////////////////////////////////////////////
 
-    function setRewardToken(address token) external {
-        require(rewardTokens[token].isApproved || token == address(0), 'Token Not Approved');
-        require(shares[msg.sender].amount >= minHolding, 'Sender Balance Too Small');
-        shares[msg.sender].rewardToken = token;
-    }
-    
-    function claim(uint256 minOut) external {
-        distributeDividend(msg.sender, minOut);
-    }
-
-    function batchClaim(address[] calldata users, uint256[] calldata minOuts) external {
-        require(shares[msg.sender].canBatchRewards || canPublicDistribute, 'Batch Rewards Not Allowed');
-        uint len = users.length;
-        for (uint256 i = 0; i < len;) {
-            address user = users[i];
-            uint256 minOut = minOuts[i];
-            if (shouldDistribute(user)) {
-                distributeDividend(user, minOut);
-            }
-            unchecked { ++i; }
-        }
-    }
-
-    function iterate(uint256 iterations) external {
-        require(shares[msg.sender].canBatchRewards || canPublicDistribute, 'Batch Rewards Not Allowed');
-        uint256 len = shareholders.length;
-        for (uint256 i = 0; i < iterations;) {
-            if (currentIndex >= len) {
-                currentIndex = 0; // Reset index if it exceeds the length
-            }
-
-            address shareholder = shareholders[currentIndex];
-            if (shouldDistribute(shareholder)) {
-                distributeDividend(shareholder, 0);
-            }
-            unchecked { ++currentIndex; }
-            unchecked { ++i; }
-        }
-    }
 
     ///////////////////////////////////////////////
     //////////    Internal Functions    ///////////
     ///////////////////////////////////////////////
+
+
+    function addTickets(address user, uint256 numTickets) internal {
+
+        
+    }
 
     function addShareholder(address shareholder) internal {
         uint index = shareholderIndexes[shareholder];
@@ -200,7 +148,6 @@ contract Distributor is Ownable, ReentrancyGuard {
 
         shareholderIndexes[shareholder] = shareholders.length;
         shareholders.push(shareholder);
-        emit AddedShareholder(shareholder);
     }
 
     function removeShareholder(address shareholder) internal { 
@@ -215,54 +162,23 @@ contract Distributor is Ownable, ReentrancyGuard {
         shareholderIndexes[shareholders[shareholders.length-1]] = shareholderIndexes[shareholder]; 
         shareholders.pop();
         delete shareholderIndexes[shareholder];
-        emit RemovedShareholder(shareholder);
     }
-    
-    function distributeDividend(address shareholder, uint256 minOut) internal nonReentrant {
-        if(shares[shareholder].amount < minHolding ){ return; }
-        
-        uint256 amount = pendingRewards(shareholder);
-        if(amount > 0){
-            
-            address token = shares[shareholder].rewardToken;
-            unchecked {
-                totalClaimedByUser[shareholder] += amount;
-            }
 
-            if (token == address(0)) {
-                if (isContract(shareholder)) {
-                    // if the shareholder is a contract, we cannot send ETH directly, wrap eth into WETH and send
-                    WETH.deposit{value: amount}();
-                    WETH.transfer(shareholder, amount);
-                } else {
-                    (bool s,) = payable(shareholder).call{value: amount}("");
-                    if (!s) {
-                        emit DividendPaymentFailed(shareholder, amount);
-                    }
-                }
-            } else {
-                ISwapper(rewardTokens[token].swapper).swap{value: amount}(
-                    token,
-                    shareholder,
-                    rewardTokens[token].buyTax,
-                    minOut
-                );
+    function _distribute(address user) internal {
+        if (isContract(user)) {
+            WETH.deposit{value: msg.value}();
+            WETH.transfer(user, msg.value);
+        } else {
+            (bool s,) = payable(user).call{value: msg.value}("");
+            if (!s) {
+                emit DividendPaymentFailed(user, msg.value);
             }
         }
-
-        // reset rewards
-        shares[shareholder].totalExcluded = getCumulativeDividends(shares[shareholder].amount);
     }
-    
+     
     ///////////////////////////////////////////////
     //////////      Read Functions      ///////////
     ///////////////////////////////////////////////
-    
-    function shouldDistribute(address shareholder) internal view returns (bool) {
-        return shares[shareholder].isRewardExempt == false && 
-               shares[shareholder].amount >= minHolding && 
-               pendingRewards(shareholder) > minDistribution;
-    }
     
     function getShareholders() external view returns (address[] memory) {
         return shareholders;
@@ -272,27 +188,8 @@ contract Distributor is Ownable, ReentrancyGuard {
         return shares[holder].amount;
     }
 
-    function pendingRewards(address shareholder) public view returns (uint256) {
-        if(shares[shareholder].amount == 0){ return 0; }
-
-        uint256 shareholderTotalDividends = getCumulativeDividends(shares[shareholder].amount);
-        uint256 shareholderTotalExcluded = shares[shareholder].totalExcluded;
-
-        if(shareholderTotalDividends <= shareholderTotalExcluded){ return 0; }
-
-        return ( shareholderTotalDividends - shareholderTotalExcluded );
-    }
-    
-    function getRewardTokenForHolder(address holder) public view returns (address) {
-        return shares[holder].rewardToken;
-    }
-
     function getCumulativeDividends(uint256 share) internal view returns (uint256) {
         return ( share * dividendsPerShare ) / dividendsPerShareAccuracyFactor;
-    }
-    
-    function isTokenApprovedForSwapping(address token) external view returns (bool) {
-        return rewardTokens[token].isApproved;
     }
     
     function getNumShareholders() external view returns(uint256) {
@@ -310,31 +207,6 @@ contract Distributor is Ownable, ReentrancyGuard {
         return paginatedShareholders;
     }
 
-    function paginateShareholdersThatCanDistribute(uint256 start, uint256 end) external view returns (address[] memory) {
-        uint256 count = 0;
-        uint len = shareholders.length;
-        if (end > len) {
-            end = len;
-        }
-        for (uint256 i = start; i < end;) {
-            if (shouldDistribute(shareholders[i])) {
-                unchecked { ++count; }
-            }
-            unchecked { ++i; }
-        }
-
-        address[] memory paginatedShareholders = new address[](count);
-        uint256 index = 0;
-        for (uint256 i = start; i < end;) {
-            if (shouldDistribute(shareholders[i])) {
-                paginatedShareholders[index] = shareholders[i];
-                unchecked { ++index; }
-            }
-            unchecked { ++i; }
-        }
-        return paginatedShareholders;
-    }
-
     function isContract(address account) internal view returns (bool) {
         // According to EIP-1052, 0x0 is the value returned for not-yet created accounts
         // and 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 is returned
@@ -345,17 +217,6 @@ contract Distributor is Ownable, ReentrancyGuard {
         assembly { codehash := extcodehash(account) }
         return (codehash != accountHash && codehash != 0x0);
     }
-
-    // EVENTS 
-    event ApproveTokenForSwapping(address token);
-    event RemovedTokenForSwapping(address token);
-    event SwappedMainTokenAddress(address newMain);
-    event UpgradeDistributor(address newDistributor);
-    event AddedShareholder(address shareholder);
-    event RemovedShareholder(address shareholder);
-    event TransferedTokenOwnership(address newOwner);
-    event SetRewardTokenForHolder(address holder, address desiredRewardToken);
-    event UpdateDistributorCriteria(uint256 minPeriod, uint256 minDistribution);
 
     receive() external payable {
         // update main dividends
