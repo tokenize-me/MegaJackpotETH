@@ -1,130 +1,328 @@
 //SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import "./IERC20.sol";
-import "./ReentrantGuard.sol";
-import "./Ownable.sol";
 
-interface ISwapper {
-    function swap(
-        address token,
-        address recipient,
-        uint8 buyTax,
-        uint256 minOut
-    ) external payable;
+interface IERC20 {
+
+    function totalSupply() external view returns (uint256);
+    
+    function symbol() external view returns(string memory);
+    
+    function name() external view returns(string memory);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+    
+    /**
+     * @dev Returns the number of decimal places
+     */
+    function decimals() external view returns (uint8);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `recipient`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `sender` to `recipient` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
-interface IWETH {
-    function deposit() external payable;
-    function transfer(address to, uint256 value) external returns (bool);
+/**
+ * @title Owner
+ * @dev Set & change owner
+ */
+contract Ownable {
+
+    address private owner;
+    
+    // event for EVM logging
+    event OwnerSet(address indexed oldOwner, address indexed newOwner);
+    
+    // modifier to check if caller is owner
+    modifier onlyOwner() {
+        // If the first argument of 'require' evaluates to 'false', execution terminates and all
+        // changes to the state and to Ether balances are reverted.
+        // This used to consume all gas in old EVM versions, but not anymore.
+        // It is often a good idea to use 'require' to check if functions are called correctly.
+        // As a second argument, you can also provide an explanation about what went wrong.
+        require(msg.sender == owner, "Caller is not owner");
+        _;
+    }
+    
+    /**
+     * @dev Set contract deployer as owner
+     */
+    constructor() {
+        owner = msg.sender; // 'msg.sender' is sender of current call, contract deployer for a constructor
+        emit OwnerSet(address(0), owner);
+    }
+
+    /**
+     * @dev Change owner
+     * @param newOwner address of new owner
+     */
+    function changeOwner(address newOwner) public onlyOwner {
+        emit OwnerSet(owner, newOwner);
+        owner = newOwner;
+    }
+
+    /**
+     * @dev Return owner address 
+     * @return address of owner
+     */
+    function getOwner() external view returns (address) {
+        return owner;
+    }
 }
 
-interface IDistributor {
-    function distribute(uint256[] calldata randomWords) external;
+interface IRNG {
+    function requestRandom() external returns (uint256 requestId); 
+}
+
+interface IPool {
+    function getCurrentPot() external view returns (uint256);
+    function distribute(address to) external;
 }
 
 /** Distributes And Tracks Reward Tokens for LightSpeed Holders based on weight */
-contract Distributor is Ownable, ReentrancyGuard {
+contract Distributor is Ownable {
     
-    // Token Contract
-    address public immutable _token;
+    // --- Constants & Immutables ---
+    uint256 public constant TICKET_VALUE = 10_000 ether;
 
-    // WETH contract
-    IWETH public constant WETH = IWETH(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    // MAX_PARTICIPANTS_POW2: Max number of participant slots in the tree.
+    // MUST be a power of 2 (e.g., 2^12=4096, 2^13=8192, 2^14=16384).
+    // This choice balances capacity vs. gas cost for tree updates.
+    uint256 public constant MAX_PARTICIPANTS_POW2 = 131072;
+
+    address public immutable TOKEN_CONTRACT;
+
+    // RNG Contract
+    IRNG public rng;
+
+    // --- Segment Tree Data ---
+    // Stores sum of tickets for each conceptual node. Root is at index 1.
+    // Leaves for MAX_PARTICIPANTS_POW2 participants start at index MAX_PARTICIPANTS_POW2.
+    mapping(uint256 => uint256) public tree;
+
+    // --- Participant Management ---
+    mapping(address => uint256) public ticketsOf;      // User address => their current ticket count
+    mapping(address => uint256) public userToLeafSlot; // User address => their assigned leaf slot (1 to MAX_PARTICIPANTS_POW2)
+                                                      // 0 if not an active participant with a slot.
+    mapping(uint256 => address) public leafSlotToUser; // Leaf slot (1 to MAX_PARTICIPANTS_POW2) => user address
+
+    mapping ( address => bool ) public isPool;
+
+    mapping ( uint256 => address ) public requestToPool;
+
+    uint256[] public freeLeafSlots; // Stack of previously used leaf slots that are now free
+    uint256 public nextUnassignedLeafSlot = 1; // Counter for assigning new leaf slots, up to MAX_PARTICIPANTS_POW2
+
+    // --- Exempt Addresses ---
+    mapping(address => bool) public isExempt;
     
-    // Share of Token
-    struct Share {
-        uint256 numShares;
-        bool isRewardExempt;
-    }
-    
-    // shareholder fields
-    address[] public shareholders;
-    mapping (address => uint256) private shareholderIndexes;
-    mapping (address => uint256) public totalClaimedByUser;
-    mapping (address => Share) public shares;
-    
-    // shares math and fields
-    uint256 public totalShares;
-    uint256 public totalDividends;
-    uint256 public dividendsPerShare;
-    uint256 constant dividendsPerShareAccuracyFactor = 10 ** 18;
+    bool public pause_while_fetching = true;
+    bool public pause_all_updates = false; // To pause ticket updates during draw fulfillment
 
-    uint256 public constant TICKET_SIZE = 10_000 ether;
-
-    uint256 public currentIndex;
-
-    event DividendPaymentFailed(address indexed shareholder, uint256 amount);
+    // --- Events ---
+    event ExemptAddressSet(address indexed addr, bool isExempt);
+    event DrawRequested(uint256 indexed requestId);
+    event WinnerSelected(address indexed winner, uint256 winningTicketNumberIndex, uint256 randomWord);
+    event DrawFailed(uint256 indexed requestId, string reason);
     
     modifier onlyToken() {
-        require(msg.sender == _token, 'Not Token'); 
+        require(msg.sender == TOKEN_CONTRACT, 'Not Token'); 
         _;
     }
 
-    constructor (address token) {
-        _token = token;
+    constructor(
+        address _tokenContractAddress,
+        address _rng
+    ) {
+        // require(_maxParticipantsPow2 > 0 && (_maxParticipantsPow2 & (_maxParticipantsPow2 - 1)) == 0, "Max participants must be > 0 and a power of 2");
+        // MAX_PARTICIPANTS_POW2 = _maxParticipantsPow2;
+        TOKEN_CONTRACT = _tokenContractAddress;
+
+        // Initialize some exempt addresses if known at deployment (e.g., token contract itself if it holds tokens)
+        isExempt[address(this)] = true;
+        isExempt[_tokenContractAddress] = true;
+        rng = IRNG(_rng);
     }
     
     ///////////////////////////////////////////////
     //////////      Only Token Owner    ///////////
     ///////////////////////////////////////////////
 
-    function setRewardExempt(address shareholder, bool exempt) external onlyOwner {
-        shares[shareholder].isRewardExempt = exempt;
-        if (exempt) {
-            if (shares[shareholder].numShares > 0) {
-                // if the shareholder is exempt, we do not need to track their shares
-                totalShares -= shares[shareholder].numShares;
-                shares[shareholder].numShares = 0;
-                removeShareholder(shareholder);
-            }
+    // --- Owner-Only Functions ---
+    function setExemptAddress(address _addr, bool _isExemptVal) external onlyOwner {
+        bool oldExemptStatus = isExempt[_addr];
+        isExempt[_addr] = _isExemptVal;
+        emit ExemptAddressSet(_addr, _isExemptVal);
+
+        // If status changed, trigger a ticket recount for this user.
+        // This ensures their tickets are added/removed from the lottery.
+        if (oldExemptStatus != _isExemptVal) {
+            uint256 currentBalance = IERC20(TOKEN_CONTRACT).balanceOf(_addr);
+            _updateUserTickets(_addr, currentBalance);
         }
     }
+
+    function setPauseAllUpdates(bool _paused) external onlyOwner {
+        pause_all_updates = _paused;
+    }
+
+    function setPauseWhileFetching(bool _pause_while_fetching) external onlyOwner {
+        pause_while_fetching = _pause_while_fetching;
+    }
+
+    function setRNG(address _rng) external onlyOwner {
+        rng = IRNG(_rng);
+    }
+
+    function withdrawETH(address to, uint256 amount) external onlyOwner {
+        (bool s,) = payable(to).call{value: amount}("");
+        require(s);
+    }
+
+    function withdrawToken(address token, address to, uint256 amount) external onlyOwner {
+        IERC20(token).transfer(to, amount);
+    }
+
+    function setIsPool(address pool, bool _isPool) external onlyOwner {
+        isPool[pool] = _isPool;
+    }
+    
 
     ///////////////////////////////////////////////
     //////////    Only Token Contract   ///////////
     ///////////////////////////////////////////////
     
-    /** Sets Share For User */
-    function setShare(address shareholder, uint256 amount) external onlyToken {
-        if (shares[shareholder].isRewardExempt) {
-            // if the shareholder is exempt, we do not need to track their shares
+    /** Sets Share For User, only callable by token contract */
+    function setShare(address user, uint256 amount) external onlyToken {
+        _updateUserTickets(user, amount);
+    }
+
+    /** Requests random number for draw */
+    function startDraw() external {
+        require(
+            isPool[msg.sender],
+            'Not Pool'
+        );
+        require(
+            IPool(msg.sender).getCurrentPot() > 0,
+            'No ETH To Win'
+        );
+        require(
+            tree[1] > 0,
+            "No tickets in lottery"
+        );
+        if (pause_while_fetching) {
+            require(
+                pause_all_updates == false,
+                'Updates Currently Paused'
+            );
+        }        
+
+        // request random, save ID
+        uint256 requestId = rng.requestRandom();
+
+        // map ID to pool
+        requestToPool[requestId] = msg.sender;
+
+        // pause all updates
+        pause_all_updates = true;
+    }
+
+    function distribute(uint256 _requestId, uint256[] calldata randomWords) external {
+        require(msg.sender == address(rng), 'Only RNG');
+        address pool = requestToPool[_requestId];
+        require(pool != address(0), 'No Pool');
+    
+        uint256 totalCurrentTickets = tree[1]; // Get total tickets from segment tree root
+
+        if (totalCurrentTickets == 0) {
+            emit DrawFailed(_requestId, "No tickets in the lottery at draw time");
+            pause_all_updates = false; // Re-enable updates
             return;
         }
 
-        if (amount < TICKET_SIZE && shares[shareholder].numShares == 0) {
-            // holder change, not above minimum, do nothing
+        uint256 winningTicketNumberIndex = randomWords[0] % totalCurrentTickets; // 0-indexed ticket
+        uint256 winnerLeafSlotId = _queryWinnerLeafSlotId(winningTicketNumberIndex);
+        address winnerAddress = leafSlotToUser[winnerLeafSlotId];
+
+        if (winnerAddress == address(0)) {
+            // This implies an empty slot won, or an error in slot management/query
+            emit DrawFailed(_requestId, "Selected winner slot is empty or invalid");
+            pause_all_updates = false; // Re-enable updates
+            return;
+        }
+        if (ticketsOf[winnerAddress] == 0) {
+            // Winner's tickets became 0 just before this, or other inconsistency
+            emit DrawFailed(_requestId, "Selected winner has zero tickets currently");
+            pause_all_updates = false;
             return;
         }
 
-        if (amount >= TICKET_SIZE && shares[shareholder].numShares > 0) {
+        emit WinnerSelected(winnerAddress, winningTicketNumberIndex, randomWords[0]);
 
-            uint256 newShares = amount / TICKET_SIZE;
-            uint256 oldShares = shares[shareholder].numShares;
+        // --- Distribute ETH Pot ---
+        IPool(pool).distribute(winnerAddress);
+        delete requestToPool[_requestId];
 
-            // share holder is already holding enough shares, update the total
-            totalShares = ( totalShares + newShares ) - oldShares;
-            shares[shareholder].numShares = newShares;
-            return;
-        }
-
-        if( amount >= TICKET_SIZE && shares[shareholder].numShares == 0){
-
-            uint256 newShares = amount / TICKET_SIZE;
-            
-            unchecked {
-                totalShares += newShares;
-            }
-            shares[shareholder].numShares = newShares;
-            addShareholder(shareholder, newShares);
-
-        } else if(amount < TICKET_SIZE && shares[shareholder].numShares > 0){
-
-            totalShares -= shares[shareholder].numShares;
-            shares[shareholder].numShares = 0;
-            removeShareholder(shareholder);
-
-        }
+        pause_all_updates = false; // Re-enable ticket updates for the next round
     }
 
 
@@ -133,95 +331,126 @@ contract Distributor is Ownable, ReentrancyGuard {
     ///////////////////////////////////////////////
 
 
-    function addTickets(address user, uint256 numTickets) internal {
-
+    // --- Internal Ticket and Segment Tree Logic ---
+    function _updateUserTickets(address _user, uint256 _currentBalance) internal {
+        if (pause_while_fetching) {
+            require(!pause_all_updates, "updates paused");
+        }
         
-    }
+        uint256 oldTicketCount = ticketsOf[_user];
+        uint256 newTicketCount;
 
-    function addShareholder(address shareholder) internal {
-        uint index = shareholderIndexes[shareholder];
-        if (index < shareholders.length) {
-            if (shareholders[index] == shareholder) {
-                return; // Shareholder already exists
-            }
-        }
-
-        shareholderIndexes[shareholder] = shareholders.length;
-        shareholders.push(shareholder);
-    }
-
-    function removeShareholder(address shareholder) internal { 
-        uint index = shareholderIndexes[shareholder];
-        if (index < shareholders.length) {
-            if (shareholders[index] != shareholder) {
-                return; // Shareholder already exists
-            }
-        }
-
-        shareholders[shareholderIndexes[shareholder]] = shareholders[shareholders.length-1];
-        shareholderIndexes[shareholders[shareholders.length-1]] = shareholderIndexes[shareholder]; 
-        shareholders.pop();
-        delete shareholderIndexes[shareholder];
-    }
-
-    function _distribute(address user) internal {
-        if (isContract(user)) {
-            WETH.deposit{value: msg.value}();
-            WETH.transfer(user, msg.value);
+        if (isExempt[_user]) {
+            newTicketCount = 0;
         } else {
-            (bool s,) = payable(user).call{value: msg.value}("");
-            if (!s) {
-                emit DividendPaymentFailed(user, msg.value);
+            newTicketCount = _currentBalance / TICKET_VALUE;
+        }
+
+        if (newTicketCount == oldTicketCount) {
+            return; // No change needed
+        }
+
+        ticketsOf[_user] = newTicketCount;
+        int256 ticketDelta = int256(newTicketCount) - int256(oldTicketCount);
+
+        uint256 userSlot = userToLeafSlot[_user];
+
+        if (userSlot == 0) { // User is not currently in a leaf slot
+            if (newTicketCount > 0) { // User gains tickets and needs a slot
+                if (freeLeafSlots.length > 0) {
+                    userSlot = freeLeafSlots[freeLeafSlots.length - 1];
+                    freeLeafSlots.pop();
+                } else {
+                    require(nextUnassignedLeafSlot <= MAX_PARTICIPANTS_POW2, "Max participant slots reached");
+                    userSlot = nextUnassignedLeafSlot;
+                    nextUnassignedLeafSlot++;
+                }
+                userToLeafSlot[_user] = userSlot;
+                leafSlotToUser[userSlot] = _user;
+            }
+            // If newTicketCount is 0 and userSlot was 0, no tree update needed.
+        } else { // User is already in a leaf slot
+            if (newTicketCount == 0) { // User drops all tickets, free up their slot
+                freeLeafSlots.push(userSlot);
+                userToLeafSlot[_user] = 0; // Mark user as not having a slot
+                leafSlotToUser[userSlot] = address(0); // Clear the slot
+            }
+            // If newTicketCount > 0 and user already in slot, slot remains the same.
+        }
+
+        // If user has/had a slot and there's a change in tickets, update the tree
+        if (userSlot != 0 && ticketDelta != 0) {
+            _updateSegmentTree(userSlot, ticketDelta);
+        }
+    }
+
+    function _updateSegmentTree(uint256 _leafSlotId, int256 _ticketDelta) internal {
+        // _leafSlotId is 1-indexed, from 1 to MAX_PARTICIPANTS_POW2
+        require(_leafSlotId > 0 && _leafSlotId <= MAX_PARTICIPANTS_POW2, "Invalid leaf slot ID");
+
+        // Calculate the actual index in the conceptual tree array (where leaves start after internal nodes)
+        // For a 1-indexed tree, leaves start at tree_array_index = MAX_PARTICIPANTS_POW2 + leafSlotId - 1
+        uint256 treeNodeIndex = MAX_PARTICIPANTS_POW2 + _leafSlotId - 1;
+
+        // Apply delta to the leaf node
+        if (_ticketDelta > 0) {
+            tree[treeNodeIndex] = tree[treeNodeIndex] + uint256(_ticketDelta);
+        } else {
+            uint256 absDelta = uint256(-_ticketDelta);
+            require(tree[treeNodeIndex] >= absDelta, "Tree underflow at leaf");
+            tree[treeNodeIndex] = tree[treeNodeIndex] - absDelta;
+        }
+
+        // Propagate delta up to the root (node 1)
+        while (treeNodeIndex > 1) {
+            treeNodeIndex = treeNodeIndex / 2; // Move to parent
+            if (_ticketDelta > 0) {
+                tree[treeNodeIndex] = tree[treeNodeIndex] + uint256(_ticketDelta);
+            } else {
+                uint256 absDelta = uint256(-_ticketDelta);
+                require(tree[treeNodeIndex] >= absDelta, "Tree underflow at internal node");
+                tree[treeNodeIndex] = tree[treeNodeIndex] - absDelta;
             }
         }
+    }
+
+    function _queryWinnerLeafSlotId(uint256 _targetTicketNumIndex) internal view returns (uint256) {
+        uint256 totalTicketsInLottery = tree[1]; // Root node has total sum
+        require(totalTicketsInLottery > 0, "No tickets in lottery");
+        require(_targetTicketNumIndex < totalTicketsInLottery, "Target ticket index out of bounds");
+
+        uint256 treeNodeIndex = 1; // Start at the root
+
+        // Traverse down until we reach a conceptual leaf node range
+        // In our 1-indexed tree mapping where leaves start at MAX_PARTICIPANTS_POW2:
+        // A node is an internal node if treeNodeIndex < MAX_PARTICIPANTS_POW2
+        while (treeNodeIndex < MAX_PARTICIPANTS_POW2) {
+            uint256 leftChildTreeIndex = treeNodeIndex * 2;
+            uint256 ticketsInLeftChild = tree[leftChildTreeIndex];
+
+            if (_targetTicketNumIndex < ticketsInLeftChild) {
+                treeNodeIndex = leftChildTreeIndex; // Go left
+            } else {
+                _targetTicketNumIndex -= ticketsInLeftChild; // Adjust for right subtree
+                treeNodeIndex = leftChildTreeIndex + 1;   // Go right
+            }
+        }
+
+        // treeNodeIndex is now the index in the `tree` mapping corresponding to the winning leaf's node
+        // Convert it back to the 1-based _leafSlotId
+        return treeNodeIndex - MAX_PARTICIPANTS_POW2 + 1;
     }
      
     ///////////////////////////////////////////////
     //////////      Read Functions      ///////////
     ///////////////////////////////////////////////
-    
-    function getShareholders() external view returns (address[] memory) {
-        return shareholders;
-    }
-    
-    function getShareForHolder(address holder) external view returns(uint256) {
-        return shares[holder].amount;
-    }
 
-    function getCumulativeDividends(uint256 share) internal view returns (uint256) {
-        return ( share * dividendsPerShare ) / dividendsPerShareAccuracyFactor;
-    }
-    
-    function getNumShareholders() external view returns(uint256) {
-        return shareholders.length;
-    }
-
-    function paginateShareholders(uint256 start, uint256 end) external view returns (address[] memory) {
-        if (end > shareholders.length) {
-            end = shareholders.length;
-        }
-        address[] memory paginatedShareholders = new address[](end - start);
-        for (uint256 i = start; i < end; i++) {
-            paginatedShareholders[i - start] = shareholders[i];
-        }
-        return paginatedShareholders;
-    }
-
-    function isContract(address account) internal view returns (bool) {
-        // According to EIP-1052, 0x0 is the value returned for not-yet created accounts
-        // and 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 is returned
-        // for accounts without code, i.e. `keccak256('')`
-        bytes32 codehash;
-        bytes32 accountHash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
-        // solhint-disable-next-line no-inline-assembly
-        assembly { codehash := extcodehash(account) }
-        return (codehash != accountHash && codehash != 0x0);
+    function getTotalTickets() external view returns (uint256) {
+        return tree[1];
     }
 
     receive() external payable {
-        // update main dividends
-        totalDividends += msg.value;
-        dividendsPerShare += ( msg.value * dividendsPerShareAccuracyFactor ) / totalShares;
+        
     }
 
 }

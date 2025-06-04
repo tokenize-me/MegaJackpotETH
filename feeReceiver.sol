@@ -353,14 +353,14 @@ contract TaxReceiver is AutomationCompatible {
     // Token
     address public immutable token;
 
-    // Addresses
-    address public treasury;
-
     // Reward distributor
     address public rewardDistributor;
 
+    // daily pool
+    address public dailyPool;
+
     // min sell point
-    uint256 public minSell = 1_000 ether;
+    uint256 public minSell = 50_000 ether;
 
     // router
     IUniswapV2Router02 public router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
@@ -373,22 +373,21 @@ contract TaxReceiver is AutomationCompatible {
         _;
     }
 
-    constructor(address _token, address _treasury, address _rewardDistributor) {
+    constructor(address _token, address _rewardDistributor, address _dailyPool) {
 
         // set token
         token = _token;
-        treasury = _treasury;
         rewardDistributor = _rewardDistributor;
-    }
-
-    function setTreasury(address treasury_) external onlyOwner {
-        require(treasury_ != address(0));
-        treasury = treasury_;
+        dailyPool = _dailyPool;
     }
 
     function setRewardDistributor(address rewardDistributor_) external onlyOwner {
         require(rewardDistributor_ != address(0));
         rewardDistributor = rewardDistributor_;
+    }
+
+    function setDailyPool(address dPool) external onlyOwner {
+        dailyPool = dPool;
     }
 
     function setRouter(address router_) external onlyOwner {
@@ -443,10 +442,14 @@ contract TaxReceiver is AutomationCompatible {
         }
 
         if (address(this).balance > 0) {
-            
+
             // Send ETH to reward distributor
-            (bool successReward, ) = payable(rewardDistributor).call{value: address(this).balance}("");
+            (bool successReward, ) = payable(rewardDistributor).call{value: ( ( address(this).balance * 9 ) / 10 )}("");
             require(successReward, "Transfer to reward distributor failed");
+
+            // Send ETH to reward distributor
+            (bool s2, ) = payable(dailyPool).call{value: address(this).balance }("");
+            require(s2, "Transfer to daily distributor failed");
         }
     }
 

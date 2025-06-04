@@ -3,7 +3,7 @@
 */
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.14;
+pragma solidity 0.8.28;
 
 // End consumer library.
 library VRFV2PlusClient {
@@ -403,8 +403,7 @@ abstract contract VRFConsumerBaseV2Plus is IVRFMigratableConsumerV2Plus, Confirm
 }
 
 interface IDistributor {
-
-    function distribute(uint256 requestId, uint256[] calldata randomWords) external;
+  function distribute(uint256 requestId, uint256[] calldata randomWords) external;
 }
 
 
@@ -428,7 +427,7 @@ contract RNGTracker is VRFConsumerBaseV2Plus {
     // Governance Manager
     address public distributor;
 
-    uint32 public gasToUse = 500_000;
+    uint32 public gasToUse = 1_000_000;
 
     uint32 public numResults = 1;
 
@@ -516,7 +515,7 @@ contract RNGTracker is VRFConsumerBaseV2Plus {
         Chainlink's callback to provide us with randomness
      */
     function fulfillRandomWords(
-        uint256,
+        uint256 requestId,
         uint256[] calldata randomWords
     ) internal override {
 
